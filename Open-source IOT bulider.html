@@ -1,0 +1,276 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getFirestore, collection, doc, onSnapshot, setDoc, deleteDoc, query } from 'firebase/firestore';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { Cpu, Trash2, Zap, Share2, Info, Plus, Calculator, Activity } from 'lucide-react';
+
+// --- Firebase 初始化 ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'open-iot-eng-001';
+const apiKey = ""; 
+
+// --- 扩展电子元件库 (Standard Electronic Library) ---
+const COMPONENT_LIBRARY = {
+  CONTROL: [
+    { type: 'ESP32-S3', cost: 35.0, vOut: 3.3, currentDraw: 0.08, category: 'MCU' },
+    { type: 'Arduino_Nano', cost: 15.0, vOut: 5.0, currentDraw: 0.02, category: 'MCU' },
+    { type: 'STM32F103', cost: 12.0, vOut: 3.3, currentDraw: 0.05, category: 'MCU' }
+  ],
+  SENSORS: [
+    { type: 'DHT11_Temp', cost: 6.5, currentDraw: 0.001, category: 'Sensor' },
+    { type: 'Ultrasonic_SR04', cost: 8.0, currentDraw: 0.015, category: 'Sensor' },
+    { type: 'MQ-2_Gas', cost: 12.5, currentDraw: 0.15, category: 'Sensor' },
+    { type: 'MPU6050_IMU', cost: 18.0, currentDraw: 0.005, category: 'Sensor' }
+  ],
+  ACTUATORS: [
+    { type: 'SG90_Servo', cost: 10.0, currentDraw: 0.2, category: 'Actuator' },
+    { type: 'Active_Buzzer', cost: 1.5, currentDraw: 0.03, category: 'Actuator' },
+    { type: '5V_Relay', cost: 4.5, currentDraw: 0.07, category: 'Actuator' },
+    { type: '0.96_OLED', cost: 22.0, currentDraw: 0.02, category: 'Actuator' }
+  ],
+  POWER: [
+    { type: 'Li-Ion_18650', cost: 25.0, vOut: 3.7, capacity: 2500, category: 'Power' },
+    { type: 'USB_5V_In', cost: 0, vOut: 5.0, capacity: Infinity, category: 'Power' },
+    { type: 'Solar_6V_1W', cost: 18.0, vOut: 6.0, capacity: 150, category: 'Power' }
+  ]
+};
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [elements, setElements] = useState({});
+  const [wires, setWires] = useState([]); // [{fromId, toId}]
+  const [selectedId, setSelectedId] = useState(null);
+  const [wireStartId, setWireStartId] = useState(null);
+  const [aiAdvice, setAiAdvice] = useState("");
+  const canvasRef = useRef(null);
+
+  // 1. 认证 (Rule 3)
+  useEffect(() => {
+    const initAuth = async () => {
+      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+        await signInWithCustomToken(auth, __initial_auth_token);
+      } else {
+        await signInAnonymously(auth);
+      }
+    };
+    initAuth();
+    return onAuthStateChanged(auth, setUser);
+  }, []);
+
+  // 2. 实时同步 (Rule 1 & 2)
+  useEffect(() => {
+    if (!user) return;
+    const elementsCol = collection(db, 'artifacts', appId, 'public', 'data', 'elements');
+    const wiresCol = collection(db, 'artifacts', appId, 'public', 'data', 'wires');
+
+    const unsubElements = onSnapshot(elementsCol, (snap) => {
+      const data = {};
+      snap.forEach(d => data[d.id] = d.data());
+      setElements(data);
+    });
+
+    const unsubWires = onSnapshot(wiresCol, (snap) => {
+      const data = [];
+      snap.forEach(d => data.push(d.data()));
+      setWires(data);
+    });
+
+    return () => { unsubElements(); unsubWires(); };
+  }, [user]);
+
+  // --- 工程操作 ---
+  const syncElement = async (id, data) => {
+    if (!user) return;
+    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'elements', id), data, { merge: true });
+  };
+
+  const addElement = (info) => {
+    const id = `node-${Date.now()}`;
+    syncElement(id, { ...info, id, x: 50, y: 50 });
+  };
+
+  const addWire = async (toId) => {
+    if (!wireStartId || wireStartId === toId) {
+      setWireStartId(null);
+      return;
+    }
+    const wireId = `wire-${wireStartId}-${toId}`;
+    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'wires', wireId), { id: wireId, from: wireStartId, to: toId });
+    setWireStartId(null);
+  };
+
+  const deleteSelection = async () => {
+    if (!selectedId || !user) return;
+    if (selectedId.startsWith('node')) {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'elements', selectedId));
+      // 同时清理相关连线
+      wires.filter(w => w.from === selectedId || w.to === selectedId).forEach(async w => {
+        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'wires', w.id));
+      });
+    }
+    setSelectedId(null);
+  };
+
+  const handleDrag = (id, e) => {
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const initX = elements[id].x;
+    const initY = elements[id].y;
+
+    const move = (me) => {
+      const nx = initX + (me.clientX - startX);
+      const ny = initY + (me.clientY - startY);
+      setElements(prev => ({ ...prev, [id]: { ...prev[id], x: nx, y: ny } }));
+    };
+    const up = (ue) => {
+      syncElement(id, { x: initX + (ue.clientX - startX), y: initY + (ue.clientY - startY) });
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  };
+
+  // --- 工程计算逻辑 ---
+  const projectStats = useMemo(() => {
+    const totalCost = Object.values(elements).reduce((sum, el) => sum + (el.cost || 0), 0);
+    const totalCurrent = Object.values(elements).reduce((sum, el) => sum + (el.currentDraw || 0), 0);
+    const powerSource = Object.values(elements).find(el => el.category === 'Power');
+    const systemVoltage = powerSource?.vOut || 0;
+    const estimatedRuntime = powerSource?.capacity && totalCurrent > 0 
+      ? (powerSource.capacity / (totalCurrent * 1000)).toFixed(1) 
+      : 'N/A';
+
+    return { totalCost, totalCurrent, systemVoltage, estimatedRuntime };
+  }, [elements]);
+
+  return (
+    <div className="flex h-screen bg-neutral-100 text-neutral-900 font-mono text-xs overflow-hidden">
+      {/* 侧边元件库 */}
+      <aside className="w-64 bg-white border-r border-neutral-300 flex flex-col shadow-sm">
+        <div className="p-4 border-b border-neutral-300 font-bold bg-neutral-50 flex items-center gap-2 text-sm">
+          <Calculator size={16}/> 元件库 (LIBRARY)
+        </div>
+        <div className="flex-1 overflow-y-auto p-3 space-y-6">
+          {Object.entries(COMPONENT_LIBRARY).map(([cat, list]) => (
+            <div key={cat} className="space-y-1">
+              <h4 className="text-[10px] text-neutral-400 font-bold uppercase tracking-widest">{cat}</h4>
+              {list.map(item => (
+                <button 
+                  key={item.type}
+                  onClick={() => addElement(item)}
+                  className="w-full flex items-center justify-between p-2 hover:bg-neutral-100 border border-transparent hover:border-neutral-200 rounded group"
+                >
+                  <span className="truncate">{item.type}</span>
+                  <Plus size={12} className="text-neutral-400 group-hover:text-blue-500"/>
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      {/* 主画布 */}
+      <main className="flex-1 flex flex-col relative bg-neutral-50">
+        <header className="h-12 border-b border-neutral-300 bg-white flex items-center justify-between px-6 z-10">
+          <div className="flex items-center gap-6">
+            <div className="flex flex-col">
+              <span className="text-[9px] text-neutral-400">总预算 (BUDGET)</span>
+              <span className="font-bold text-emerald-600">¥ {projectStats.totalCost.toFixed(2)}</span>
+            </div>
+            <div className="flex flex-col border-l border-neutral-200 pl-6">
+              <span className="text-[9px] text-neutral-400">预测电流 (LOAD)</span>
+              <span className="font-bold text-blue-600">{projectStats.totalCurrent.toFixed(3)} A</span>
+            </div>
+            <div className="flex flex-col border-l border-neutral-200 pl-6">
+              <span className="text-[9px] text-neutral-400">预估续航 (EST.)</span>
+              <span className="font-bold text-neutral-700">{projectStats.estimatedRuntime} hr</span>
+            </div>
+          </div>
+          
+          <div className="flex items-center gap-3">
+             <button onClick={() => setSelectedId(null)} className="text-neutral-400 hover:text-neutral-600 px-2 underline">清除选择</button>
+             {selectedId && (
+               <button onClick={deleteSelection} className="flex items-center gap-1 text-red-500 font-bold border border-red-200 px-2 py-1 rounded hover:bg-red-50">
+                 <Trash2 size={12}/> 删除元件
+               </button>
+             )}
+          </div>
+        </header>
+
+        {/* 工程绘图区 */}
+        <div 
+          ref={canvasRef}
+          className="flex-1 relative overflow-hidden bg-white cursor-crosshair"
+          style={{ backgroundImage: 'radial-gradient(#d1d5db 1px, transparent 1px)', backgroundSize: '24px 24px' }}
+        >
+          {/* 渲染布线 */}
+          <svg className="absolute inset-0 pointer-events-none w-full h-full">
+            {wires.map(w => {
+              const from = elements[w.from];
+              const to = elements[w.to];
+              if (!from || !to) return null;
+              return (
+                <line 
+                  key={w.id}
+                  x1={from.x + 40} y1={from.y + 40}
+                  x2={to.x + 40} y2={to.y + 40}
+                  stroke="#3b82f6" strokeWidth="2" strokeDasharray="4 2"
+                />
+              );
+            })}
+          </svg>
+
+          {/* 渲染元件 */}
+          {Object.values(elements).map(el => (
+            <div
+              key={el.id}
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                if (wireStartId) {
+                  addWire(el.id);
+                } else {
+                  setSelectedId(el.id);
+                  handleDrag(el.id, e);
+                }
+              }}
+              className={`absolute w-20 h-20 border-2 bg-white flex flex-col items-center justify-center transition-all ${
+                selectedId === el.id ? 'border-blue-600 shadow-xl z-20' : 
+                wireStartId === el.id ? 'border-amber-500 animate-pulse z-20' : 'border-neutral-300 z-10'
+              }`}
+              style={{ left: el.x, top: el.y }}
+            >
+              <div className="text-neutral-400 mb-1">
+                {el.category === 'MCU' ? <Cpu size={24}/> : <Zap size={24}/>}
+              </div>
+              <span className="text-[8px] font-bold text-center px-1 truncate w-full">{el.type}</span>
+              
+              {/* 连线端点按钮 */}
+              <button 
+                className="absolute -right-2 top-1/2 -translate-y-1/2 w-4 h-4 bg-neutral-200 border border-neutral-400 rounded-full hover:bg-blue-500 z-30 flex items-center justify-center"
+                onMouseDown={(e) => { e.stopPropagation(); setWireStartId(el.id); }}
+                title="创建逻辑连线"
+              >
+                <div className="w-1.5 h-1.5 bg-white rounded-full"></div>
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {/* 底部运行日志 */}
+        <footer className="h-32 bg-neutral-900 border-t border-neutral-700 p-4 font-mono text-emerald-500 overflow-y-auto">
+          <div className="flex items-center gap-2 mb-2 text-white font-bold opacity-80 uppercase text-[10px]">
+             <Activity size={12}/> 系统实时仿真 (SYSTEM EMULATION)
+          </div>
+          <div className="opacity-80">{"[OK] 全局工程同步已建立..."}</div>
+          <div className="opacity-80">{`[STATS] 系统工作电压: ${projectStats.systemVoltage}V | 节点数: ${Object.keys(elements).length}`}</div>
+          {projectStats.totalCurrent > 0.5 && <div className="text-amber-400">{"[WARN] 电流负载较高 (超过 500mA)，请注意电源散热。"}</div>}
+          <div className="text-blue-400">{"[AI] 建议提示：点击元件右侧小圆点开始逻辑连线。"}</div>
+        </footer>
+      </main>
+    </div>
+  );
+}
