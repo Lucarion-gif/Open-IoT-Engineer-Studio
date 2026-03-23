@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IoT Pro Engineer Studio</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        :root {
+            --bg-paper: #fdfaf5;
+            --grid-line: #eeeae3;
+            --accent: #3b82f6;
+            --border-dark: #4a4a4a;
+        }
+
+        body { 
+            background-color: var(--bg-paper); 
+            color: #374151; 
+            font-family: 'Inter', system-ui, sans-serif;
+            overflow: hidden; 
+        }
+
+        /* 米白色工程网格 */
+        #canvas-area {
+            background-color: var(--bg-paper);
+            background-image: radial-gradient(var(--grid-line) 1px, transparent 1px);
+            background-size: 20px 20px;
+            position: relative;
+            flex-grow: 1;
+            cursor: crosshair;
+            overflow: hidden;
+        }
+
+        /* 左侧菜单栏细线风格 */
+        .sidebar {
+            width: 320px;
+            background: rgba(253, 250, 245, 0.95);
+            backdrop-filter: blur(10px);
+            border-right: 1px solid #e5e0d8;
+            display: flex;
+            flex-direction: column;
+            z-index: 100;
+        }
+
+        /* 元件卡片 */
+        .comp-node {
+            position: absolute;
+            background: white;
+            border: 1.5px solid var(--border-dark);
+            border-radius: 2px;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 90px;
+            z-index: 10;
+            user-select: none;
+            box-shadow: 2px 2px 0px rgba(0,0,0,0.05);
+        }
+        .comp-node.selected {
+            border-color: var(--accent);
+            border-width: 2px;
+            box-shadow: 0 4px 15px rgba(59, 130, 246, 0.15);
+        }
+
+        /* 电子引脚点 */
+        .pin {
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            background: white;
+            border: 1px solid var(--border-dark);
+            border-radius: 50%;
+            cursor: pointer;
+            z-index: 30;
+        }
+        .pin:hover { background: var(--accent); transform: scale(1.3); }
+        .pin.active { background: var(--accent); border-color: var(--accent); }
+
+        /* SVG 连线层 */
+        #wire-svg {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            z-index: 5;
+        }
+
+        /* 滚动条美化 */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #e5e0d8; border-radius: 10px; }
+    </style>
+</head>
+<body class="flex h-screen">
+
+    <!-- 侧边栏元件库 -->
+    <aside class="sidebar shadow-2xl">
+        <div class="p-6 border-b border-stone-200">
+            <h1 class="text-sm font-black tracking-widest text-stone-800 uppercase">IoT Builder Pro</h1>
+            <p class="text-[9px] text-stone-400 mt-1 font-bold">SCHEMATIC DESIGNER V5.0</p>
+        </div>
+
+        <div class="flex-1 overflow-y-auto px-4 py-2 space-y-4" id="library-container">
+            <!-- 动态生成元件列表 -->
+        </div>
+
+        <!-- 底部数据统计 -->
+        <div class="p-6 bg-stone-100 border-t border-stone-200 space-y-3">
+            <div class="flex justify-between text-[10px] font-bold">
+                <span class="text-stone-400">BOM 预估成本:</span>
+                <span id="total-cost" class="text-blue-600">￥0.00</span>
+            </div>
+            <div class="flex justify-between text-[10px] font-bold">
+                <span class="text-stone-400">系统总功耗:</span>
+                <span id="total-power" class="text-emerald-600">0 mW</span>
+            </div>
+            <button onclick="exportJSON()" class="w-full bg-stone-800 text-white py-2 text-[11px] font-bold rounded-sm hover:bg-black transition-all">导出工程文件</button>
+        </div>
+    </aside>
+
+    <!-- 主工作区 -->
+    <main class="flex-1 relative flex flex-col">
+        <div id="canvas-area">
+            <svg id="wire-svg"></svg>
+        </div>
+
+        <!-- 参数调节浮窗 (Inspector) -->
+        <div id="inspector" class="absolute top-6 right-6 w-64 bg-white/90 backdrop-blur border border-stone-200 p-5 shadow-xl rounded hidden z-50">
+            <h3 class="text-[10px] font-black text-stone-400 uppercase mb-4 tracking-widest">元件参数 (Properties)</h3>
+            <div id="inspector-content" class="space-y-4"></div>
+        </div>
+
+        <!-- 底部仿真日志 -->
+        <div class="h-32 bg-stone-900 p-4 font-mono text-[10px] text-emerald-500 overflow-y-auto border-t border-stone-800">
+            <div class="flex items-center gap-2 mb-2 text-white/50 font-bold uppercase">
+                <i data-lucide="activity" class="w-3 h-3"></i> 实时电路仿真输出 (Circuit Emulation)
+            </div>
+            <div id="log-stream">
+                [OK] 系统内核初始化完成...<br>
+                [OK] 等待添加物理元件...
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // --- 核心元件库 (35款不同功能的电子元件) ---
+        const COMPONENT_LIBRARY = {
+            "核心控制 (MCU)": [
+                { type: 'ESP32-S3', icon: 'cpu', cost: 25, power: 80, pins: 2 },
+                { type: 'Arduino Uno', icon: 'cpu', cost: 15, power: 50, pins: 2 },
+                { type: 'STM32F103', icon: 'cpu', cost: 12, power: 40, pins: 2 },
+                { type: 'Raspberry Pi Pico', icon: 'cpu', cost: 30, power: 90, pins: 2 },
+                { type: 'nRF52840', icon: 'bluetooth', cost: 35, power: 20, pins: 2 }
+            ],
+            "基础传感器 (SENSORS)": [
+                { type: 'DHT11 温湿度', icon: 'thermometer', cost: 5, power: 2, pins: 2 },
+                { type: '超声波测距', icon: 'radio', cost: 8, power: 15, pins: 2 },
+                { type: '光敏电阻', icon: 'sun', cost: 1, power: 1, pins: 2 },
+                { type: '红外人体感应', icon: 'eye', cost: 6, power: 5, pins: 2 },
+                { type: 'MQ-2 烟雾检测', icon: 'wind', cost: 12, power: 150, pins: 2 },
+                { type: '土壤湿度计', icon: 'droplets', cost: 4, power: 3, pins: 2 },
+                { type: '三轴加速度计', icon: 'move', cost: 15, power: 8, pins: 2 }
+            ],
+            "电源管理 (POWER)": [
+                { type: '12V 直流电源', icon: 'zap', cost: 20, power: -5000, pins: 2 },
+                { type: '3.3V 稳压模块', icon: 'zap', cost: 3, power: 5, pins: 2 },
+                { type: '太阳能板', icon: 'sun', cost: 45, power: -2000, pins: 2 },
+                { type: '锂电池充电管理', icon: 'battery-charging', cost: 10, power: 10, pins: 2 },
+                { type: '发电电机', icon: 'refresh-cw', cost: 25, power: -1000, pins: 2 }
+            ],
+            "执行器 (ACTUATORS)": [
+                { type: '磁控继电器', icon: 'layers', cost: 5, power: 70, pins: 4 },
+                { type: 'SG90 舵机', icon: 'navigation', cost: 12, power: 200, pins: 2 },
+                { type: '步进电机驱动', icon: 'settings', cost: 18, power: 500, pins: 2 },
+                { type: '蜂鸣器', icon: 'volume-2', cost: 2, power: 30, pins: 2 },
+                { type: '电磁锁', icon: 'lock', cost: 25, power: 800, pins: 2 },
+                { type: 'RGB 指示灯', icon: 'lightbulb', cost: 2, power: 20, pins: 2 }
+            ],
+            "显示与通信 (DISPLAY/COMM)": [
+                { type: 'OLED 128x64', icon: 'monitor', cost: 18, power: 25, pins: 2 },
+                { type: 'LCD 1602', icon: 'tv', cost: 12, power: 60, pins: 2 },
+                { type: '4G 模块', icon: 'rss', cost: 65, power: 400, pins: 2 },
+                { type: 'GPS 定位器', icon: 'map-pin', cost: 45, power: 120, pins: 2 },
+                { type: 'LoRa 终端', icon: 'radio-tower', cost: 38, power: 50, pins: 2 }
+            ],
+            "无源元件 (PASSIVE)": [
+                { type: '10K 电阻', icon: 'minus', cost: 0.1, power: 0, pins: 2 },
+                { type: '滑动变阻器', icon: 'sliders', cost: 2, power: 0, pins: 3 },
+                { type: '100uF 电容', icon: 'database', cost: 0.5, power: 0, pins: 2 },
+                { type: '拨码开关', icon: 'toggle-left', cost: 1, power: 0, pins: 2 },
+                { type: '整流二极管', icon: 'arrow-right', cost: 0.2, power: 0, pins: 2 },
+                { type: '按键开关', icon: 'circle', cost: 0.5, power: 0, pins: 2 }
+            ]
+        };
+
+        let canvasElements = [];
+        let connections = [];
+        let selected = null;
+        let wireStart = null;
+
+        // --- 初始化界面 ---
+        function initLibrary() {
+            const container = document.getElementById('library-container');
+            Object.entries(COMPONENT_LIBRARY).forEach(([category, items]) => {
+                const section = document.createElement('div');
+                section.innerHTML = `<h4 class="text-[9px] font-black text-stone-400 uppercase tracking-widest mb-2 mt-4">${category}</h4>`;
+                const grid = document.createElement('div');
+                grid.className = "grid grid-cols-2 gap-2";
+                
+                items.forEach(item => {
+                    const btn = document.createElement('button');
+                    btn.className = "p-3 bg-white border border-stone-200 rounded text-[10px] hover:border-blue-500 hover:shadow-sm flex flex-col items-center gap-2 transition-all group";
+                    btn.innerHTML = `
+                        <i data-lucide="${item.icon}" class="w-4 h-4 text-stone-500 group-hover:text-blue-500"></i>
+                        <span class="truncate w-full font-medium text-stone-700">${item.type}</span>
+                    `;
+                    btn.onclick = () => spawn(item);
+                    grid.appendChild(btn);
+                });
+                section.appendChild(grid);
+                container.appendChild(section);
+            });
+            lucide.createIcons();
+        }
+
+        // --- 核心操作 ---
+        function spawn(data) {
+            const id = 'id-' + Math.random().toString(36).substr(2, 9);
+            const el = { ...data, id, x: 200 + Math.random()*50, y: 200 + Math.random()*50 };
+            canvasElements.push(el);
+            render(el);
+            updateStats();
+            log(`[SPAWN] 已部署元件: ${el.type}`);
+        }
+
+        function render(el) {
+            const div = document.createElement('div');
+            div.className = 'comp-node';
+            div.id = el.id;
+            div.style.left = el.x + 'px';
+            div.style.top = el.y + 'px';
+            div.innerHTML = `
+                <i data-lucide="${el.icon}" class="w-6 h-6 mb-1 text-stone-700"></i>
+                <span class="text-[8px] font-black uppercase text-stone-500 tracking-tighter">${el.type}</span>
+            `;
+
+            // 引脚生成
+            for(let i=0; i<el.pins; i++) {
+                const pin = document.createElement('div');
+                pin.className = 'pin';
+                if(el.pins === 4) { // 继电器型布局
+                    if(i===0) { pin.style.left='-4px'; pin.style.top='25%'; }
+                    if(i===1) { pin.style.left='-4px'; pin.style.top='75%'; }
+                    if(i===2) { pin.style.right='-4px'; pin.style.top='25%'; }
+                    if(i===3) { pin.style.right='-4px'; pin.style.top='75%'; }
+                } else {
+                    if(i===0) { pin.style.left='-4px'; pin.style.top='45%'; }
+                    else { pin.style.right='-4px'; pin.style.top='45%'; }
+                }
+                
+                pin.onclick = (e) => {
+                    e.stopPropagation();
+                    handlePinClick(el, i, pin);
+                };
+                div.appendChild(pin);
+            }
+
+            // 拖拽逻辑
+            div.onmousedown = (e) => {
+                if(e.target.classList.contains('pin')) return;
+                select(el, div);
+                const ox = e.clientX - div.offsetLeft;
+                const oy = e.clientY - div.offsetTop;
+                document.onmousemove = (me) => {
+                    el.x = Math.round((me.clientX - ox) / 10) * 10;
+                    el.y = Math.round((me.clientY - oy) / 10) * 10;
+                    div.style.left = el.x + 'px';
+                    div.style.top = el.y + 'px';
+                    drawWires();
+                };
+                document.onmouseup = () => { document.onmousemove = null; };
+            };
+
+            document.getElementById('canvas-area').appendChild(div);
+            lucide.createIcons();
+        }
+
+        function handlePinClick(el, pinIdx, pinEl) {
+            const pinId = `${el.id}:${pinIdx}`;
+            if (!wireStart) {
+                wireStart = { el, pinIdx, pinEl, pinId };
+                pinEl.classList.add('active');
+            } else {
+                if (wireStart.el.id !== el.id) {
+                    connections.push({ from: wireStart.pinId, to: pinId, fromEl: wireStart.el, toEl: el });
+                    log(`[CONN] 建立连线: ${wireStart.el.type} -> ${el.type}`);
+                }
+                document.querySelectorAll('.pin').forEach(p => p.classList.remove('active'));
+                wireStart = null;
+                drawWires();
+            }
+        }
+
+        function drawWires() {
+            const svg = document.getElementById('wire-svg');
+            svg.innerHTML = '';
+            connections.forEach(conn => {
+                const [id1, p1] = conn.from.split(':');
+                const [id2, p2] = conn.to.split(':');
+                const el1 = document.getElementById(id1);
+                const el2 = document.getElementById(id2);
+                if(!el1 || !el2) return;
+
+                const pin1 = el1.querySelectorAll('.pin')[p1].getBoundingClientRect();
+                const pin2 = el2.querySelectorAll('.pin')[p2].getBoundingClientRect();
+                const canvas = document.getElementById('canvas-area').getBoundingClientRect();
+
+                const x1 = pin1.left - canvas.left + 4;
+                const y1 = pin1.top - canvas.top + 4;
+                const x2 = pin2.left - canvas.left + 4;
+                const y2 = pin2.top - canvas.top + 4;
+
+                const midX = x1 + (x2 - x1) / 2;
+                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                path.setAttribute('d', `M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`);
+                path.setAttribute('stroke', '#4a4a4a');
+                path.setAttribute('stroke-width', '1.5');
+                path.setAttribute('fill', 'none');
+                svg.appendChild(path);
+            });
+        }
+
+        function select(el, dom) {
+            if(selected) selected.dom.classList.remove('selected');
+            selected = { el, dom };
+            dom.classList.add('selected');
+            
+            const ins = document.getElementById('inspector');
+            const cont = document.getElementById('inspector-content');
+            ins.classList.remove('hidden');
+            cont.innerHTML = `
+                <div class="text-[9px] text-stone-400 font-bold mb-2 uppercase">元件信息</div>
+                <div class="text-xs font-bold text-stone-800">${el.type}</div>
+                <div class="grid grid-cols-2 gap-4 mt-4">
+                    <div>
+                        <div class="text-[8px] text-stone-400 font-bold uppercase">功耗 (mW)</div>
+                        <div class="text-xs font-mono">${el.power}</div>
+                    </div>
+                    <div>
+                        <div class="text-[8px] text-stone-400 font-bold uppercase">成本 (CNY)</div>
+                        <div class="text-xs font-mono">￥${el.cost}</div>
+                    </div>
+                </div>
+                <button onclick="deleteSelected()" class="w-full mt-6 py-2 bg-red-50 text-red-500 border border-red-100 text-[10px] font-bold rounded hover:bg-red-100 transition-all">删除此元件</button>
+            `;
+        }
+
+        window.deleteSelected = () => {
+            if(!selected) return;
+            const id = selected.el.id;
+            canvasElements = canvasElements.filter(e => e.id !== id);
+            connections = connections.filter(c => !c.from.includes(id) && !c.to.includes(id));
+            selected.dom.remove();
+            selected = null;
+            document.getElementById('inspector').classList.add('hidden');
+            drawWires();
+            updateStats();
+            log(`[DELETE] 元件已移除`);
+        };
+
+        function updateStats() {
+            const cost = canvasElements.reduce((s, e) => s + e.cost, 0);
+            const power = canvasElements.reduce((s, e) => s + e.power, 0);
+            document.getElementById('total-cost').innerText = `￥${cost.toFixed(2)}`;
+            document.getElementById('total-power').innerText = `${power} mW`;
+        }
+
+        function log(msg) {
+            const content = document.getElementById('log-stream');
+            const time = new Date().toLocaleTimeString().split(' ')[0];
+            content.innerHTML = `[${time}] ${msg}<br>` + content.innerHTML;
+        }
+
+        function exportJSON() {
+            const data = JSON.stringify({ elements: canvasElements, connections });
+            console.log("Exported Project Data:", data);
+            alert("工程数据已导出至控制台 (F12)");
+        }
+
+        window.onkeydown = (e) => {
+            if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected();
+        };
+
+        window.onload = initLibrary;
+    </script>
+</body>
+</html>
